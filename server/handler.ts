@@ -8,6 +8,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createHash } from 'node:crypto'
 import { runComps, type RunResult } from './agent.js'
 import { makeQlooClient } from './qloo.js'
+import { loadSamples } from './samples.js'
 
 const MAX_PITCH = 600
 const MAX_COMPS = 4
@@ -47,6 +48,17 @@ function rateLimited(ip: string, now = Date.now()) {
   if (recent.length >= PER_IP_PER_HOUR) return true
   hits.set(ip, [...recent, now])
   return false
+}
+
+export async function handleSamples(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+  if (req.method !== 'GET' || !req.url?.startsWith('/api/samples')) return false
+  try {
+    const samples = await loadSamples()
+    send(res, 200, samples.map(({ slug, title, input, result }) => ({ slug, title, input, result })))
+  } catch {
+    send(res, 200, [])
+  }
+  return true
 }
 
 export async function handleReport(req: IncomingMessage, res: ServerResponse): Promise<boolean> {

@@ -68,7 +68,8 @@ export function checkReport(report: Report, log: EvidenceLog): CheckedReport {
 }
 
 export interface RunInput { pitch: string; comps: string[] }
-export interface RunResult { report: CheckedReport; evidence: EvidenceLog['records']; qlooMode: 'live' | 'mock'; notes: string }
+export interface Usage { input: number; output: number; cacheRead: number; requests: number }
+export interface RunResult { report: CheckedReport; evidence: EvidenceLog['records']; qlooMode: 'live' | 'mock'; notes: string; usage: Usage }
 
 export async function runComps(input: RunInput, qloo: QlooClient, client = new Anthropic()): Promise<RunResult> {
   const log = new EvidenceLog()
@@ -104,7 +105,12 @@ export async function runComps(input: RunInput, qloo: QlooClient, client = new A
 
   const brief = `Pitch: ${input.pitch}\nComps given by the creator: ${input.comps.length ? input.comps.join('; ') : '(none)'}`
 
-  const research = await client.beta.messages.toolRunner({
+  const usage: Usage = { input: 0, output: 0, cacheRead: 0, requests: 0 }
+  const add = (u: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null }) => {
+    usage.input += u.input_tokens; usage.output += u.output_tokens; usage.cacheRead += u.cache_read_input_tokens ?? 0; usage.requests++
+  }
+
+  const runner = client.beta.messages.toolRunner({
     model: MODEL,
     max_tokens: 16000,
     max_iterations: 14,
@@ -114,6 +120,8 @@ export async function runComps(input: RunInput, qloo: QlooClient, client = new A
     messages: [{ role: 'user', content: brief }],
     ...FALLBACK,
   })
+  for await (const message of runner) add(message.usage)
+  const research = await runner.done()
   const notes = research.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('\n').trim()
 
   const evidenceText = log.records.map(describe).join('\n\n')
@@ -125,8 +133,9 @@ export async function runComps(input: RunInput, qloo: QlooClient, client = new A
     messages: [{ role: 'user', content: `${brief}\n\nResearch notes:\n${notes || '(none)'}\n\nEvidence:\n${evidenceText || '(no evidence collected)'}` }],
     ...FALLBACK,
   })
+  add(parsed.usage)
   if (parsed.stop_reason === 'refusal') throw new Error('The model declined to write this report.')
   if (!parsed.parsed_output) throw new Error(`Report could not be parsed (stop reason: ${parsed.stop_reason}).`)
 
-  return { report: checkReport(parsed.parsed_output, log), evidence: log.records, qlooMode: qloo.mode, notes }
+  return { report: checkReport(parsed.parsed_output, log), evidence: log.records, qlooMode: qloo.mode, notes, usage }
 }

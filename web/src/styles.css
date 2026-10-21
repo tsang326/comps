@@ -28,3 +28,6 @@ button.primary:disabled { opacity: .6; cursor: progress; }
 .evidence .link { margin-left: auto; border: 0; background: none; color: var(--accent); cursor: pointer; }
 .evidence .input { font-size: 12px; white-space: pre-wrap; word-break: break-all; color: var(--muted); margin: 0 0 8px; }
 footer { margin-top: 24px; font-size: 13px; }
+.samples { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; font-size: 14px; }
+.sample { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 999px; padding: 5px 12px; font: inherit; cursor: pointer; }
+.sample:hover { border-color: var(--accent); }

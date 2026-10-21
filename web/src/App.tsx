@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { RunResult } from '../../server/agent'
 import type { Evidence } from '../../server/evidence'
 
@@ -40,13 +40,30 @@ function EvidencePanel({ ev, onClose }: { ev: Evidence; onClose: () => void }) {
   )
 }
 
+interface Sample { slug: string; title: string; input: { pitch: string; comps: string[] }; result: RunResult }
+
 export default function App() {
+  const [samples, setSamples] = useState<Sample[]>([])
   const [pitch, setPitch] = useState(EXAMPLE.pitch)
   const [comps, setComps] = useState(EXAMPLE.comps)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<RunResult | null>(null)
   const [open, setOpen] = useState<string | null>(null)
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    fetch('/api/samples').then((r) => r.json()).then((s) => Array.isArray(s) && setSamples(s)).catch(() => {})
+  }, [])
+  useEffect(() => {
+    if (!busy) return
+    setElapsed(0)
+    const t = setInterval(() => setElapsed((e) => e + 1), 1000)
+    return () => clearInterval(t)
+  }, [busy]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const showSample = (s: Sample) => {
+    setPitch(s.input.pitch); setComps(s.input.comps.join(', ')); setError(null); setOpen(null); setResult(s.result)
+  }
 
   async function run() {
     setBusy(true); setError(null); setResult(null); setOpen(null)
@@ -78,6 +95,13 @@ export default function App() {
         <p>Find out who your indie game or book is for, and where to reach them. Built on Qloo's taste data: every recommendation shows the signal behind it.</p>
       </header>
 
+      {samples.length > 0 && (
+        <section className="samples">
+          <span className="muted">See a finished plan:</span>
+          {samples.map((s) => <button key={s.slug} className="sample" onClick={() => showSample(s)}>{s.title}</button>)}
+        </section>
+      )}
+
       <section className="card form">
         <label>Your pitch
           <textarea value={pitch} onChange={(e) => setPitch(e.target.value)} rows={3} maxLength={600} />
@@ -85,7 +109,8 @@ export default function App() {
         <label>Comparable titles (optional, comma separated)
           <input value={comps} onChange={(e) => setComps(e.target.value)} placeholder="Stardew Valley, A Short Hike" />
         </label>
-        <button className="primary" onClick={run} disabled={busy}>{busy ? 'Researching… (about a minute)' : 'Build my launch plan'}</button>
+        <button className="primary" onClick={run} disabled={busy}>{busy ? `Researching with Qloo… ${elapsed}s` : 'Build my launch plan'}</button>
+        {busy && <p className="muted">The agent resolves your comps, asks Qloo what the same audience likes in other domains, then writes the plan. Usually 30–60 seconds.</p>}
         {error && <p className="error">{error}</p>}
       </section>
 
