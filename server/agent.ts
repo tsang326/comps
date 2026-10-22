@@ -7,8 +7,8 @@ import { chat, strictSchema, type ChatMessage, type ChatUsage } from './openai.j
 import { ENTITY_TYPES, type QlooClient } from './qloo.js'
 import { EvidenceLog, describe, isSupported } from './evidence.js'
 
-// OpenAI models: samples can use a stronger one (make-sample), public runs the default
-export const MODEL = process.env.COMPS_MODEL ?? 'gpt-4.1-mini'
+// OpenAI model for reports and samples: gpt-4.1 gave the fullest, best-cited plan in our comparison
+export const MODEL = process.env.COMPS_MODEL ?? 'gpt-4.1'
 // USD per 1M tokens, from OpenAI's pricing page (read 2026-10-22)
 export const PRICES: Record<string, { input: number; output: number }> = {
   'gpt-4.1': { input: 2, output: 8 }, 'gpt-4.1-mini': { input: 0.4, output: 1.6 }, 'gpt-4.1-nano': { input: 0.1, output: 0.4 },
@@ -194,7 +194,8 @@ export async function runComps(input: RunInput, qloo: QlooClient, model = MODEL)
  * "Without Qloo" baseline: the same model, same pitch, no data. Shown next to
  * the Qloo plan so a reader can see what the taste data adds.
  */
-export const BASELINE_MODEL = process.env.COMPS_BASELINE_MODEL ?? 'gpt-4.1-mini'
+// Same model as the report, so the comparison isolates what the Qloo data adds
+export const BASELINE_MODEL = process.env.COMPS_BASELINE_MODEL ?? MODEL
 
 const BaselineSchema = z.object({
   channels: z.array(z.object({

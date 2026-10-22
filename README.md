@@ -16,7 +16,7 @@ Indie creators rarely know who their audience is beyond "people who like games l
 | `qloo_insights` | `GET /v2/insights` with `filter.type` + `signal.interests.entities` / `signal.interests.tags` | The core step: what the comps' audience also likes in **other** entity types (podcast, artist, tv_show, brand, book, movie). |
 | `qloo_tags` | `GET /v2/tags` | Turn a theme from the pitch ("cozy", "roguelike") into a tag signal. |
 
-The agent (OpenAI gpt-4.1-mini with function calling, raw HTTP in `server/openai.ts`) decides which comps and domains to query, notices empty results and tries another comp or domain instead of guessing.
+The agent (OpenAI gpt-4.1 with function calling, raw HTTP in `server/openai.ts`) decides which comps and domains to query, notices empty results and tries another comp or domain instead of guessing.
 
 **Provenance by construction.** Every Qloo call is stored server-side as an evidence record (E1, E2, …). The report is written as structured output where each comp, channel and positioning point must cite evidence IDs, and the server then **drops any item whose name does not appear in the evidence it cites** (the UI lists what was dropped). Clicking an evidence chip shows the exact Qloo query and results behind a recommendation.
 

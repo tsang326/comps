@@ -42,6 +42,17 @@ function EvidencePanel({ ev, onClose }: { ev: Evidence; onClose: () => void }) {
 
 interface Sample { slug: string; title: string; input: { pitch: string; comps: string[]; reach?: 'any' | 'reachable' }; result: RunResult; baseline?: Baseline }
 
+// A random id kept in this browser: the server limits new reports per device as well as per IP
+const DEVICE_ID = (() => {
+  try {
+    const k = 'comps-device'
+    const v = localStorage.getItem(k) ?? crypto.randomUUID()
+    localStorage.setItem(k, v)
+    return v
+  } catch { return crypto.randomUUID() }
+})()
+const HEADERS = { 'Content-Type': 'application/json', 'X-Device-Id': DEVICE_ID }
+
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 
 /** Side by side: the Qloo plan against what the same model suggests with no data. */
@@ -98,7 +109,7 @@ export default function App() {
     try {
       const res = await fetch('/api/report', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: HEADERS,
         body: JSON.stringify({ pitch, comps: comps.split(/[,;\n]/), reach }),
       })
       const data = await res.json()
@@ -114,7 +125,7 @@ export default function App() {
   async function compare() {
     setComparing(true); setError(null)
     try {
-      const res = await fetch('/api/baseline', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pitch, comps: comps.split(/[,;\n]/) }) })
+      const res = await fetch('/api/baseline', { method: 'POST', headers: HEADERS, body: JSON.stringify({ pitch, comps: comps.split(/[,;\n]/) }) })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
       setBaseline(data)

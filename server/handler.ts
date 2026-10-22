@@ -13,9 +13,13 @@ import { loadSamples, redis } from './samples.js'
 const MAX_PITCH = 600
 const MAX_COMPS = 4
 const PER_IP_PER_HOUR = 5
+// Per device (an id the browser keeps in localStorage) as well as per IP: a shared
+// office IP is not punished for one heavy user, and one device can't rotate IPs.
+const PER_DEVICE_PER_HOUR = 3
+const PER_DEVICE_PER_DAY = 8
 // Model for new public runs (OpenAI); the daily cap bounds what a burst of traffic can cost.
 const PUBLIC_MODEL = process.env.COMPS_PUBLIC_MODEL ?? MODEL
-const DAILY_CAP = Number(process.env.COMPS_DAILY_CAP ?? 50)
+const DAILY_CAP = Number(process.env.COMPS_DAILY_CAP ?? 30)
 
 const memory = new Map<string, unknown>()
 const hits = new Map<string, number[]>()
@@ -47,6 +51,19 @@ async function countUse(key: string, windowSeconds: number): Promise<number> {
 
 const overDailyCap = async () => (await countUse(`day:${new Date().toISOString().slice(0, 10)}`, 2 * 86_400)) > DAILY_CAP
 const rateLimited = async (ip: string, bucket = 'report') => (await countUse(`${bucket}:${ip}:${new Date().toISOString().slice(0, 13)}`, 3600)) > PER_IP_PER_HOUR
+
+/** The browser's device id (x-device-id), or '' when missing or malformed. */
+const deviceId = (req: IncomingMessage) => {
+  const d = String(req.headers['x-device-id'] ?? '')
+  return /^[a-z0-9-]{8,64}$/i.test(d) ? d : ''
+}
+/** Over a device limit; a request with no device id is treated as one shared "unknown" device. */
+async function deviceLimited(req: IncomingMessage, bucket = 'report') {
+  const d = deviceId(req) || 'unknown'
+  const now = new Date().toISOString()
+  return (await countUse(`${bucket}:dev:${d}:${now.slice(0, 13)}`, 3600)) > PER_DEVICE_PER_HOUR
+    || (await countUse(`${bucket}:devday:${d}:${now.slice(0, 10)}`, 2 * 86_400)) > PER_DEVICE_PER_DAY
+}
 
 function send(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json' })
@@ -86,7 +103,7 @@ export async function handleBaseline(req: IncomingMessage, res: ServerResponse):
   const key = createHash('sha256').update(JSON.stringify({ pitch: input.pitch, comps: input.comps }).toLowerCase()).digest('hex')
   const cached = await getCached<Baseline>(`baseline:${key}`)
   if (cached) { send(res, 200, cached); return true }
-  if (await rateLimited(clientIp(req), 'baseline')) { send(res, 429, { error: 'Too many comparisons from this address; try again in an hour.' }); return true }
+  if (await deviceLimited(req, 'baseline') || await rateLimited(clientIp(req), 'baseline')) { send(res, 429, { error: 'Too many comparisons from this address; try again in an hour.' }); return true }
   try {
     const b = await runBaseline(input)
     await setCached(`baseline:${key}`, b)
@@ -122,7 +139,7 @@ export async function handleReport(req: IncomingMessage, res: ServerResponse): P
   if (cached) { send(res, 200, { ...cached, cached: true }); return true }
 
   if (await overDailyCap()) { send(res, 429, { error: 'Today\'s free reports are used up; open a sample report, or try again tomorrow.' }); return true }
-  if (await rateLimited(clientIp(req))) { send(res, 429, { error: 'Too many new reports from this address; try again in an hour or open a sample report.' }); return true }
+  if (await deviceLimited(req) || await rateLimited(clientIp(req))) { send(res, 429, { error: 'Too many new reports from this address; try again in an hour or open a sample report.' }); return true }
 
   try {
     const result = await runComps(input, makeQlooClient(), PUBLIC_MODEL)
