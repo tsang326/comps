@@ -9,7 +9,7 @@ const EXAMPLE = {
 
 const DOMAIN_LABEL: Record<string, string> = {
   podcast: 'Podcasts', artist: 'Artists', tv_show: 'TV shows', brand: 'Brands', book: 'Books',
-  movie: 'Movies', destination: 'Destinations', video_game: 'Games', person: 'People', place: 'Places',
+  movie: 'Movies', destination: 'Destinations', videogame: 'Games', person: 'People', place: 'Places',
 }
 
 function EvidenceChips({ ids, onOpen }: { ids: string[]; onOpen: (id: string) => void }) {

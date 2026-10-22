@@ -34,7 +34,7 @@ const ReportSchema = z.object({
   audience_summary: z.string().describe('2-3 sentences: who this audience is, grounded in the evidence'),
   comps: z.array(z.object({ name: z.string(), why: z.string(), evidence: z.array(z.string()) })),
   channels: z.array(z.object({
-    domain: z.enum(['podcast', 'artist', 'tv_show', 'brand', 'book', 'movie', 'destination', 'video_game', 'person', 'place']),
+    domain: z.enum(['podcast', 'artist', 'tv_show', 'brand', 'book', 'movie', 'destination', 'videogame', 'person', 'place']),
     name: z.string(),
     action: z.string().describe('What the creator should do with this, e.g. pitch, reference in ads'),
     evidence: z.array(z.string()),

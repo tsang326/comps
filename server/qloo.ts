@@ -2,9 +2,10 @@
  * Qloo API client. Hackathon keys only work against hackathon.api.qloo.com,
  * sent as the X-Api-Key header. The key stays on the server.
  *
- * Response field names below follow the docs read on 2026-10-21
- * (results.entities, query.affinity, feature.explainability); the parser is
- * lenient on purpose until we have seen real responses.
+ * Response field names follow the docs read on 2026-10-21 (results.entities,
+ * query.affinity) and what the hackathon API returned on 2026-10-22: /search
+ * gives a flat results array with a types array, and the game type is
+ * urn:entity:videogame (no underscore).
  */
 
 export const ENTITY_TYPES = [
@@ -17,7 +18,7 @@ export const ENTITY_TYPES = [
   'urn:entity:place',
   'urn:entity:podcast',
   'urn:entity:tv_show',
-  'urn:entity:video_game',
+  'urn:entity:videogame',
 ] as const
 export type EntityType = (typeof ENTITY_TYPES)[number]
 
@@ -60,13 +61,17 @@ export function parseEntities(json: unknown): QlooEntity[] {
     const id = e.entity_id ?? e.id
     if (typeof id !== 'string' || typeof e.name !== 'string') return []
     const query = (e.query ?? {}) as Record<string, unknown>
+    // Keep the tags that describe taste (tone, audience, genre, gameplay), not platforms
     const tags = Array.isArray(e.tags)
-      ? e.tags.map((t) => (t as { name?: unknown }).name).filter((n): n is string => typeof n === 'string').slice(0, 6)
+      ? [...new Set(e.tags
+          .filter((t) => !/:(platform|player_mode):/.test(String((t as { type?: unknown }).type ?? '')))
+          .map((t) => (t as { name?: unknown }).name)
+          .filter((n): n is string => typeof n === 'string'))].slice(0, 10)
       : undefined
     return [{
       entity_id: id,
       name: e.name,
-      type: typeof e.type === 'string' ? e.type : undefined,
+      type: typeof e.type === 'string' ? e.type : Array.isArray(e.types) && typeof e.types[0] === 'string' ? e.types[0] : undefined,
       popularity: num(e.popularity),
       affinity: num(query.affinity),
       tags,
@@ -122,7 +127,7 @@ export class MockQlooClient implements QlooClient {
     return `${prefix}-${h.toString(16)}`
   }
 
-  async search(query: string, type: EntityType = 'urn:entity:video_game') {
+  async search(query: string, type: EntityType = 'urn:entity:videogame') {
     return [{ entity_id: this.id('mock', query), name: `${query} (mock)`, type, popularity: 0.5 }]
   }
 

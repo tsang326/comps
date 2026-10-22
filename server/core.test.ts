@@ -15,6 +15,13 @@ describe('isSupported', () => {
     expect(isSupported(log, 'Cozy', ['E2'])).toBe(true)
     expect(isSupported(log, 'Cozy Corner Podcast', ['E9'])).toBe(false)
   })
+
+  it('accepts a tag carried by an entity in a cited record', () => {
+    const l = new EvidenceLog()
+    l.add('qloo_insights', { type: 'urn:entity:videogame' }, [{ entity_id: 'g1', name: 'Some Game', tags: ['stress-free', 'Exploration'] }])
+    expect(isSupported(l, 'Stress-free', ['E1'])).toBe(true)
+    expect(isSupported(l, 'therapeutic', ['E1'])).toBe(false)
+  })
 })
 
 describe('checkReport', () => {

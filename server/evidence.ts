@@ -29,12 +29,12 @@ export class EvidenceLog {
 
 const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
 
-/** True when `name` is one of the entities or tags in at least one cited record. */
+/** True when `name` is an entity, an entity's tag, or a tag in at least one cited record. */
 export function isSupported(log: EvidenceLog, name: string, cited: string[]): boolean {
   const n = norm(name)
   return cited.some((id) => {
     const r = log.get(id)
-    return !!r && (r.entities.some((e) => norm(e.name) === n) || r.tags.some((t) => norm(t.name) === n))
+    return !!r && (r.entities.some((e) => norm(e.name) === n || e.tags?.some((t) => norm(t) === n)) || r.tags.some((t) => norm(t.name) === n))
   })
 }
 
