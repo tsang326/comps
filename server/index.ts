@@ -3,13 +3,14 @@
  * On Vercel the same handler runs as a function in /api.
  */
 import { createServer } from 'node:http'
-import { handleReport, handleSamples } from './handler.js'
+import { handleBaseline, handleReport, handleSamples } from './handler.js'
 import { makeQlooClient } from './qloo.js'
 
 const PORT = 3001
 
 createServer(async (req, res) => {
   if (await handleReport(req, res)) return
+  if (await handleBaseline(req, res)) return
   if (await handleSamples(req, res)) return
   if (req.method === 'GET' && req.url === '/api/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' })

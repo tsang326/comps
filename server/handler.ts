@@ -6,7 +6,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createHash } from 'node:crypto'
-import { runComps, type RunResult } from './agent.js'
+import { runBaseline, runComps, type Baseline, type Reach, type RunResult } from './agent.js'
 import { makeQlooClient } from './qloo.js'
 import { loadSamples } from './samples.js'
 
@@ -15,6 +15,7 @@ const MAX_COMPS = 4
 const PER_IP_PER_HOUR = 5
 
 const cache = new Map<string, RunResult>()
+const baselineCache = new Map<string, Baseline>()
 const hits = new Map<string, number[]>()
 
 function send(res: ServerResponse, status: number, body: unknown) {
@@ -31,8 +32,8 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   return JSON.parse(raw || '{}')
 }
 
-export function parseInput(body: unknown): { pitch: string; comps: string[] } | string {
-  const b = body as { pitch?: unknown; comps?: unknown }
+export function parseInput(body: unknown): { pitch: string; comps: string[]; reach: Reach } | string {
+  const b = body as { pitch?: unknown; comps?: unknown; reach?: unknown }
   const pitch = typeof b.pitch === 'string' ? b.pitch.trim() : ''
   if (pitch.length < 20) return 'Describe your game or book in at least a sentence.'
   if (pitch.length > MAX_PITCH) return `Keep the pitch under ${MAX_PITCH} characters.`
@@ -40,21 +41,46 @@ export function parseInput(body: unknown): { pitch: string; comps: string[] } | 
     ? b.comps.filter((c): c is string => typeof c === 'string').map((c) => c.trim()).filter(Boolean).slice(0, MAX_COMPS)
     : []
   if (comps.some((c) => c.length > 80)) return 'Each comparable title should be under 80 characters.'
-  return { pitch, comps }
+  return { pitch, comps, reach: b.reach === 'reachable' ? 'reachable' : 'any' }
 }
 
-function rateLimited(ip: string, now = Date.now()) {
-  const recent = (hits.get(ip) ?? []).filter((t) => now - t < 3_600_000)
+function rateLimited(ip: string, now = Date.now(), bucket = 'report') {
+  const k = `${bucket}:${ip}`
+  const recent = (hits.get(k) ?? []).filter((t) => now - t < 3_600_000)
   if (recent.length >= PER_IP_PER_HOUR) return true
-  hits.set(ip, [...recent, now])
+  hits.set(k, [...recent, now])
   return false
+}
+
+const clientIp = (req: IncomingMessage) => String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? 'unknown').split(',')[0].trim()
+
+/** POST /api/baseline { pitch, comps[] } -> what the model suggests without Qloo. */
+export async function handleBaseline(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
+  if (req.method !== 'POST' || !req.url?.startsWith('/api/baseline')) return false
+  let body: unknown
+  try { body = await readJson(req) } catch { send(res, 400, { error: 'Invalid JSON body.' }); return true }
+  const input = parseInput(body)
+  if (typeof input === 'string') { send(res, 422, { error: input }); return true }
+  const key = createHash('sha256').update(JSON.stringify({ pitch: input.pitch, comps: input.comps }).toLowerCase()).digest('hex')
+  const cached = baselineCache.get(key)
+  if (cached) { send(res, 200, cached); return true }
+  if (rateLimited(clientIp(req), Date.now(), 'baseline')) { send(res, 429, { error: 'Too many comparisons from this address; try again in an hour.' }); return true }
+  try {
+    const b = await runBaseline(input)
+    baselineCache.set(key, b)
+    send(res, 200, b)
+  } catch (err) {
+    console.error('baseline failed:', err instanceof Error ? err.message : String(err))
+    send(res, 502, { error: 'The comparison failed. Please try again in a minute.' })
+  }
+  return true
 }
 
 export async function handleSamples(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
   if (req.method !== 'GET' || !req.url?.startsWith('/api/samples')) return false
   try {
     const samples = await loadSamples()
-    send(res, 200, samples.map(({ slug, title, input, result }) => ({ slug, title, input, result })))
+    send(res, 200, samples.map(({ slug, title, input, result, baseline }) => ({ slug, title, input, result, baseline })))
   } catch {
     send(res, 200, [])
   }
@@ -73,8 +99,7 @@ export async function handleReport(req: IncomingMessage, res: ServerResponse): P
   const cached = cache.get(key)
   if (cached) { send(res, 200, { ...cached, cached: true }); return true }
 
-  const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? 'unknown').split(',')[0].trim()
-  if (rateLimited(ip)) { send(res, 429, { error: 'Too many new reports from this address; try again in an hour or open a sample report.' }); return true }
+  if (rateLimited(clientIp(req))) { send(res, 429, { error: 'Too many new reports from this address; try again in an hour or open a sample report.' }); return true }
 
   try {
     const result = await runComps(input, makeQlooClient())

@@ -66,9 +66,14 @@ describe('MockQlooClient', () => {
 })
 
 describe('parseInput', () => {
+  it('reads the small-budget reach option', () => {
+    expect(parseInput({ pitch: 'A cozy farming game about a lighthouse keeper.', reach: 'reachable' })).toMatchObject({ reach: 'reachable' })
+    expect(parseInput({ pitch: 'A cozy farming game about a lighthouse keeper.', reach: 'anything else' })).toMatchObject({ reach: 'any' })
+  })
+
   it('validates pitch and trims comps', () => {
     expect(parseInput({ pitch: 'short' })).toMatch(/at least/)
     expect(parseInput({ pitch: 'A cozy farming game about a lighthouse keeper.', comps: [' Stardew Valley ', '', 3] }))
-      .toEqual({ pitch: 'A cozy farming game about a lighthouse keeper.', comps: ['Stardew Valley'] })
+      .toEqual({ pitch: 'A cozy farming game about a lighthouse keeper.', comps: ['Stardew Valley'], reach: 'any' })
   })
 })

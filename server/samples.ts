@@ -6,9 +6,9 @@
  */
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { Redis } from '@upstash/redis'
-import type { RunInput, RunResult } from './agent.js'
+import type { Baseline, RunInput, RunResult } from './agent.js'
 
-export interface Sample { slug: string; title: string; input: RunInput; result: RunResult; createdAt: string }
+export interface Sample { slug: string; title: string; input: RunInput; result: RunResult; baseline?: Baseline; createdAt: string }
 
 const KEY = 'comps:samples'
 const FILE = new URL('../cache/samples.json', import.meta.url)

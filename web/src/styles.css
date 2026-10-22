@@ -31,3 +31,10 @@ footer { margin-top: 24px; font-size: 13px; }
 .samples { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; font-size: 14px; }
 .sample { border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 999px; padding: 5px 12px; font: inherit; cursor: pointer; }
 .sample:hover { border-color: var(--accent); }
+.check { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; margin: 4px 0 10px; }
+.check input { margin-top: 3px; }
+.compare .cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+@media (max-width: 720px) { .compare .cols { grid-template-columns: 1fr; } }
+.compare h3 { font-size: 14px; margin: 6px 0; }
+.compare .count { font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; margin-left: 4px; }
+.compare ul { padding-left: 18px; margin: 0; }

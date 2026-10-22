@@ -42,6 +42,8 @@ export interface InsightsQuery {
   entityIds?: string[]
   tagIds?: string[]
   take?: number
+  /** Only results at or below this popularity (0-1): smaller names a small team can reach. */
+  maxPopularity?: number
 }
 
 export interface QlooClient {
@@ -86,7 +88,12 @@ export class HttpQlooClient implements QlooClient {
   private async get(path: string, params: Record<string, string>): Promise<unknown> {
     const url = `${this.baseUrl}${path}?${new URLSearchParams(params)}`
     const res = await fetch(url, { headers: { 'X-Api-Key': this.apiKey }, signal: AbortSignal.timeout(15_000) })
-    if (!res.ok) throw new Error(`Qloo ${path} returned HTTP ${res.status}`)
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      // Some titles are searchable but carry no taste signal: Qloo answers 400 "were invalid"
+      if (res.status === 400 && /were invalid/.test(body)) return { results: { entities: [] } }
+      throw new Error(`Qloo ${path} returned HTTP ${res.status}`)
+    }
     return res.json()
   }
 
@@ -98,6 +105,7 @@ export class HttpQlooClient implements QlooClient {
     const params: Record<string, string> = { 'filter.type': q.type, take: String(q.take ?? 10) }
     if (q.entityIds?.length) params['signal.interests.entities'] = q.entityIds.join(',')
     if (q.tagIds?.length) params['signal.interests.tags'] = q.tagIds.join(',')
+    if (q.maxPopularity !== undefined) params['filter.popularity.max'] = String(q.maxPopularity)
     return parseEntities(await this.get('/v2/insights', params))
   }
 

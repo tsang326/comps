@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import type { RunResult } from '../../server/agent'
+import type { Baseline, RunResult } from '../../server/agent'
 import type { Evidence } from '../../server/evidence'
 
 const EXAMPLE = {
@@ -40,7 +40,32 @@ function EvidencePanel({ ev, onClose }: { ev: Evidence; onClose: () => void }) {
   )
 }
 
-interface Sample { slug: string; title: string; input: { pitch: string; comps: string[] }; result: RunResult }
+interface Sample { slug: string; title: string; input: { pitch: string; comps: string[]; reach?: 'any' | 'reachable' }; result: RunResult; baseline?: Baseline }
+
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+
+/** Side by side: the Qloo plan against what the same model suggests with no data. */
+function Comparison({ result, baseline }: { result: RunResult; baseline: Baseline }) {
+  const qlooNames = new Set(result.report.channels.map((c) => norm(c.name)))
+  const inEvidence = new Set(result.evidence.flatMap((e) => e.entities.map((x) => norm(x.name))))
+  const both = baseline.channels.filter((c) => qlooNames.has(norm(c.name)))
+  const modelOnly = baseline.channels.filter((c) => !qlooNames.has(norm(c.name)))
+  const qlooOnly = result.report.channels.filter((c) => !baseline.channels.some((b) => norm(b.name) === norm(c.name)))
+  return (
+    <div className="card compare">
+      <h2>What Qloo adds</h2>
+      <p className="muted">The same pitch, given to a model with no data ({baseline.model}), against the Qloo-grounded plan above.</p>
+      <div className="cols">
+        <div><h3>Only with Qloo <span className="count">{qlooOnly.length}</span></h3>
+          <ul>{qlooOnly.map((c) => <li key={c.name}>{c.name} <span className="muted">{DOMAIN_LABEL[c.domain] ?? c.domain}</span></li>)}</ul></div>
+        <div><h3>Both <span className="count">{both.length}</span></h3>
+          <ul>{both.map((c) => <li key={c.name}>{c.name}</li>)}</ul></div>
+        <div><h3>Model alone <span className="count">{modelOnly.length}</span></h3>
+          <ul>{modelOnly.map((c) => <li key={c.name}>{c.name} <span className="muted">{inEvidence.has(norm(c.name)) ? 'also in Qloo data' : 'no Qloo signal'}</span></li>)}</ul></div>
+      </div>
+    </div>
+  )
+}
 
 export default function App() {
   const [samples, setSamples] = useState<Sample[]>([])
@@ -49,6 +74,9 @@ export default function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<RunResult | null>(null)
+  const [reach, setReach] = useState<'any' | 'reachable'>('any')
+  const [baseline, setBaseline] = useState<Baseline | null>(null)
+  const [comparing, setComparing] = useState(false)
   const [open, setOpen] = useState<string | null>(null)
   const [elapsed, setElapsed] = useState(0)
   useEffect(() => {
@@ -62,16 +90,16 @@ export default function App() {
   }, [busy]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const showSample = (s: Sample) => {
-    setPitch(s.input.pitch); setComps(s.input.comps.join(', ')); setError(null); setOpen(null); setResult(s.result)
+    setPitch(s.input.pitch); setComps(s.input.comps.join(', ')); setReach(s.input.reach ?? 'any'); setError(null); setOpen(null); setResult(s.result); setBaseline(s.baseline ?? null)
   }
 
   async function run() {
-    setBusy(true); setError(null); setResult(null); setOpen(null)
+    setBusy(true); setError(null); setResult(null); setOpen(null); setBaseline(null)
     try {
       const res = await fetch('/api/report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pitch, comps: comps.split(/[,;\n]/) }),
+        body: JSON.stringify({ pitch, comps: comps.split(/[,;\n]/), reach }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
@@ -80,6 +108,20 @@ export default function App() {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function compare() {
+    setComparing(true); setError(null)
+    try {
+      const res = await fetch('/api/baseline', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pitch, comps: comps.split(/[,;\n]/) }) })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
+      setBaseline(data)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setComparing(false)
     }
   }
 
@@ -109,6 +151,8 @@ export default function App() {
         <label>Comparable titles (optional, comma separated)
           <input value={comps} onChange={(e) => setComps(e.target.value)} placeholder="Stardew Valley, A Short Hike" />
         </label>
+        <label className="check"><input type="checkbox" checked={reach === 'reachable'} onChange={(e) => setReach(e.target.checked ? 'reachable' : 'any')} />
+          Small budget: favour channels a small team can actually reach (less mainstream podcasts, artists and shows)</label>
         <button className="primary" onClick={run} disabled={busy}>{busy ? `Researching with Qloo… ${elapsed}s` : 'Build my launch plan'}</button>
         {busy && <p className="muted">The agent resolves your comps, asks Qloo what the same audience likes in other domains, then writes the plan. Usually 30–60 seconds.</p>}
         {error && <p className="error">{error}</p>}
@@ -151,6 +195,14 @@ export default function App() {
             <div className="card interpretation">
               <h2>Our interpretation <span className="tag">not Qloo data</span></h2>
               <p>{r.interpretation}</p>
+            </div>
+          )}
+
+          {baseline ? <Comparison result={result} baseline={baseline} /> : (
+            <div className="card compare">
+              <h2>What Qloo adds</h2>
+              <p className="muted">See what a model suggests for the same pitch with no data, next to this plan.</p>
+              <button onClick={compare} disabled={comparing}>{comparing ? 'Asking the model alone…' : 'Compare with a model alone'}</button>
             </div>
           )}
 

@@ -28,7 +28,8 @@ Hard rules:
 - Every recommended channel, comp and positioning point must cite evidence ids, and its "name" must be copied exactly from an entity or tag in one of those records.
 - Qloo describes what groups of people tend to like, not what one person will do. Never state an affinity as a fact about an individual or a guarantee.
 - Anything that is your own interpretation rather than Qloo data goes in "interpretation", clearly labelled.
-- Be specific and practical: who to pitch, what to reference, why.`
+- Be specific and practical: who to pitch, what to reference, why.
+- At most 4 channels per domain: pick the strongest, so the plan stays usable.`
 
 const ReportSchema = z.object({
   audience_summary: z.string().describe('2-3 sentences: who this audience is, grounded in the evidence'),
@@ -67,7 +68,10 @@ export function checkReport(report: Report, log: EvidenceLog): CheckedReport {
   }
 }
 
-export interface RunInput { pitch: string; comps: string[] }
+export type Reach = 'any' | 'reachable'
+export interface RunInput { pitch: string; comps: string[]; reach?: Reach }
+/** Popularity cap for cross-domain results in "reachable" mode (Qloo popularity is 0-1). */
+export const REACHABLE_MAX_POPULARITY = 0.7
 export interface Usage { input: number; output: number; cacheRead: number; requests: number }
 export interface RunResult { report: CheckedReport; evidence: EvidenceLog['records']; qlooMode: 'live' | 'mock'; notes: string; usage: Usage }
 
@@ -91,9 +95,15 @@ export async function runComps(input: RunInput, qloo: QlooClient, client = new A
         tag_ids: z.array(z.string()).max(5).optional(),
         take: z.number().int().min(1).max(15).optional(),
       }),
-      run: async ({ type, entity_ids, tag_ids, take }) =>
-        describe(log.add('qloo_insights', { type, entity_ids, tag_ids, take },
-          await qloo.insights({ type, entityIds: entity_ids, tagIds: tag_ids, take }))),
+      run: async ({ type, entity_ids, tag_ids, take }) => {
+        // Reachable mode caps popularity for channels, not for the comps themselves
+        const max_popularity = input.reach === 'reachable' && type !== 'urn:entity:videogame' && type !== 'urn:entity:book' ? REACHABLE_MAX_POPULARITY : undefined
+        const rec = log.add('qloo_insights', { type, entity_ids, tag_ids, take, ...(max_popularity ? { max_popularity } : {}) },
+          await qloo.insights({ type, entityIds: entity_ids, tagIds: tag_ids, take, maxPopularity: max_popularity }))
+        const text = describe(rec)
+        return rec.entities.length || !entity_ids?.length ? text
+          : `${text}\nQloo has no taste signal for these ids. Use a different comp, or another search hit for the same title.`
+      },
     }),
     betaZodTool({
       name: 'qloo_tags',
@@ -103,7 +113,10 @@ export async function runComps(input: RunInput, qloo: QlooClient, client = new A
     }),
   ]
 
-  const brief = `Pitch: ${input.pitch}\nComps given by the creator: ${input.comps.length ? input.comps.join('; ') : '(none)'}`
+  const reachNote = input.reach === 'reachable'
+    ? `\nReach: the creator has a small budget. Cross-domain results are limited to less mainstream names (Qloo popularity <= ${REACHABLE_MAX_POPULARITY}) that a small team can realistically contact; favour those.`
+    : ''
+  const brief = `Pitch: ${input.pitch}\nComps given by the creator: ${input.comps.length ? input.comps.join('; ') : '(none)'}${reachNote}`
 
   const usage: Usage = { input: 0, output: 0, cacheRead: 0, requests: 0 }
   const add = (u: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null }) => {
@@ -138,4 +151,31 @@ export async function runComps(input: RunInput, qloo: QlooClient, client = new A
   if (!parsed.parsed_output) throw new Error(`Report could not be parsed (stop reason: ${parsed.stop_reason}).`)
 
   return { report: checkReport(parsed.parsed_output, log), evidence: log.records, qlooMode: qloo.mode, notes, usage }
+}
+
+/*
+ * "Without Qloo" baseline: the same model, same pitch, no data. Shown next to
+ * the Qloo plan so a reader can see what the taste data adds.
+ */
+export const BASELINE_MODEL = 'claude-sonnet-5-5'
+
+const BaselineSchema = z.object({
+  channels: z.array(z.object({
+    domain: z.enum(['podcast', 'artist', 'tv_show', 'brand', 'book', 'movie']),
+    name: z.string(),
+  })).describe('Where this audience can be reached, up to 4 per domain'),
+})
+export interface Baseline { model: string; channels: z.infer<typeof BaselineSchema>['channels']; usage: Usage }
+
+export async function runBaseline(input: RunInput, client = new Anthropic()): Promise<Baseline> {
+  const parsed = await client.beta.messages.parse({
+    model: BASELINE_MODEL,
+    max_tokens: 4000,
+    output_config: { effort: 'low', format: betaZodOutputFormat(BaselineSchema) },
+    system: 'Without any external data, suggest where the audience for this indie game or book can be reached: podcasts, music artists, TV shows, brands, books and movies they likely enjoy. Real names only, up to 4 per domain.',
+    messages: [{ role: 'user', content: `Pitch: ${input.pitch}\nComparable titles: ${input.comps.join('; ') || '(none)'}` }],
+  })
+  if (!parsed.parsed_output) throw new Error(`Baseline could not be parsed (stop reason: ${parsed.stop_reason}).`)
+  const u = parsed.usage
+  return { model: BASELINE_MODEL, channels: parsed.parsed_output.channels, usage: { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens ?? 0, requests: 1 } }
 }
