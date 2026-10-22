@@ -2,16 +2,24 @@
  * Comps agent: research with Qloo tools, then write a launch report in which
  * every recommendation cites the evidence records it came from.
  */
-import Anthropic from '@anthropic-ai/sdk'
-import { betaZodTool, betaZodOutputFormat } from '@anthropic-ai/sdk/helpers/beta/zod'
 import { z } from 'zod'
+import { chat, strictSchema, type ChatMessage, type ChatUsage } from './openai.js'
 import { ENTITY_TYPES, type QlooClient } from './qloo.js'
 import { EvidenceLog, describe, isSupported } from './evidence.js'
 
-export const MODEL = 'claude-opus-5-5'
-
-// Refusals on this model route to a fallback model server-side
-const FALLBACK = { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const }
+// OpenAI models: samples can use a stronger one (make-sample), public runs the default
+export const MODEL = process.env.COMPS_MODEL ?? 'gpt-4.1-mini'
+// USD per 1M tokens, from OpenAI's pricing page (read 2026-10-22)
+export const PRICES: Record<string, { input: number; output: number }> = {
+  'gpt-4.1': { input: 2, output: 8 }, 'gpt-4.1-mini': { input: 0.4, output: 1.6 }, 'gpt-4.1-nano': { input: 0.1, output: 0.4 },
+  'gpt-5-mini': { input: 0.25, output: 2 }, 'gpt-5.4-mini': { input: 0.75, output: 4.5 },
+}
+export const costUSD = (model: string, u: { input: number; output: number }) => {
+  const p = PRICES[model] ?? PRICES['gpt-4.1']
+  return (u.input * p.input + u.output * p.output) / 1e6
+}
+// Reasoning models spend completion tokens on thinking, so they get a larger budget
+const maxTokens = (model: string, base: number) => (model.startsWith('gpt-5') ? base * 4 : base)
 
 const RESEARCH_SYSTEM = `You research the audience for an indie game or self-published book, using Qloo's taste data.
 
@@ -29,7 +37,7 @@ Hard rules:
 - Qloo describes what groups of people tend to like, not what one person will do. Never state an affinity as a fact about an individual or a guarantee.
 - Anything that is your own interpretation rather than Qloo data goes in "interpretation", clearly labelled.
 - Be specific and practical: who to pitch, what to reference, why.
-- At most 4 channels per domain: pick the strongest, so the plan stays usable.`
+- Give 2-4 channels in each domain the evidence covers (podcasts, artists, TV, brands, books, movies), strongest first; never more than 4 per domain.`
 
 const ReportSchema = z.object({
   audience_summary: z.string().describe('2-3 sentences: who this audience is, grounded in the evidence'),
@@ -48,16 +56,29 @@ export type Report = z.infer<typeof ReportSchema>
 
 export interface CheckedReport extends Report {
   dropped: { section: string; name: string; reason: string }[]
+  /** Items whose name is in the Qloo data but which cited the wrong record; their evidence was corrected. */
+  repaired: { section: string; name: string; from: string[]; to: string[] }[]
 }
 
-/** Drop any item whose name is not found in the evidence it cites. */
+/**
+ * Keep only items whose name appears in the Qloo evidence. If the name is in the
+ * data but the model cited the wrong record (common with smaller models), point
+ * the item at the records that do contain it instead of dropping it.
+ */
 export function checkReport(report: Report, log: EvidenceLog): CheckedReport {
   const dropped: CheckedReport['dropped'] = []
+  const repaired: CheckedReport['repaired'] = []
+  const allIds = log.records.map((r) => r.id)
   const keep = <T extends { name: string; evidence: string[] }>(section: string, items: T[]) =>
-    items.filter((it) => {
-      const ok = isSupported(log, it.name, it.evidence)
-      if (!ok) dropped.push({ section, name: it.name, reason: it.evidence.length ? `not found in ${it.evidence.join(', ')}` : 'no evidence cited' })
-      return ok
+    items.flatMap((it) => {
+      if (isSupported(log, it.name, it.evidence)) return [it]
+      const found = allIds.filter((id) => isSupported(log, it.name, [id]))
+      if (found.length) {
+        repaired.push({ section, name: it.name, from: it.evidence, to: found })
+        return [{ ...it, evidence: found }]
+      }
+      dropped.push({ section, name: it.name, reason: it.evidence.length ? `not found in ${it.evidence.join(', ')} or any other Qloo result` : 'not in any Qloo result' })
+      return []
     })
   return {
     ...report,
@@ -65,6 +86,7 @@ export function checkReport(report: Report, log: EvidenceLog): CheckedReport {
     channels: keep('channels', report.channels),
     positioning: keep('positioning', report.positioning),
     dropped,
+    repaired,
   }
 }
 
@@ -73,29 +95,28 @@ export interface RunInput { pitch: string; comps: string[]; reach?: Reach }
 /** Popularity cap for cross-domain results in "reachable" mode (Qloo popularity is 0-1). */
 export const REACHABLE_MAX_POPULARITY = 0.7
 export interface Usage { input: number; output: number; cacheRead: number; requests: number }
-export interface RunResult { report: CheckedReport; evidence: EvidenceLog['records']; qlooMode: 'live' | 'mock'; notes: string; usage: Usage }
+export interface RunResult { report: CheckedReport; evidence: EvidenceLog['records']; qlooMode: 'live' | 'mock'; notes: string; usage: Usage; model: string }
 
-export async function runComps(input: RunInput, qloo: QlooClient, client = new Anthropic()): Promise<RunResult> {
+export async function runComps(input: RunInput, qloo: QlooClient, model = MODEL): Promise<RunResult> {
   const log = new EvidenceLog()
   const entityType = z.enum(ENTITY_TYPES)
 
-  const tools = [
-    betaZodTool({
-      name: 'qloo_search',
+  const tools: Record<string, { description: string; schema: z.ZodType; run: (args: never) => Promise<string> }> = {
+    qloo_search: {
       description: 'Find Qloo entities (and their ids) by name, e.g. a game, book, artist or podcast title.',
-      inputSchema: z.object({ query: z.string(), type: entityType.optional() }),
-      run: async ({ query, type }) => describe(log.add('qloo_search', { query, type }, await qloo.search(query, type))),
-    }),
-    betaZodTool({
-      name: 'qloo_insights',
+      schema: z.object({ query: z.string(), type: entityType.optional() }),
+      run: async ({ query, type }: { query: string; type?: z.infer<typeof entityType> }) =>
+        describe(log.add('qloo_search', { query, type }, await qloo.search(query, type))),
+    },
+    qloo_insights: {
       description: 'What people who like the given entities/tags also like, within one entity type. Use entity ids from qloo_search.',
-      inputSchema: z.object({
+      schema: z.object({
         type: entityType,
         entity_ids: z.array(z.string()).max(5).optional(),
         tag_ids: z.array(z.string()).max(5).optional(),
         take: z.number().int().min(1).max(15).optional(),
       }),
-      run: async ({ type, entity_ids, tag_ids, take }) => {
+      run: async ({ type, entity_ids, tag_ids, take }: { type: z.infer<typeof entityType>; entity_ids?: string[]; tag_ids?: string[]; take?: number }) => {
         // Reachable mode caps popularity for channels, not for the comps themselves
         const max_popularity = input.reach === 'reachable' && type !== 'urn:entity:videogame' && type !== 'urn:entity:book' ? REACHABLE_MAX_POPULARITY : undefined
         const rec = log.add('qloo_insights', { type, entity_ids, tag_ids, take, ...(max_popularity ? { max_popularity } : {}) },
@@ -104,14 +125,18 @@ export async function runComps(input: RunInput, qloo: QlooClient, client = new A
         return rec.entities.length || !entity_ids?.length ? text
           : `${text}\nQloo has no taste signal for these ids. Use a different comp, or another search hit for the same title.`
       },
-    }),
-    betaZodTool({
-      name: 'qloo_tags',
+    },
+    qloo_tags: {
       description: 'Find Qloo tag ids for a theme keyword such as "cozy" or "roguelike".',
-      inputSchema: z.object({ query: z.string() }),
-      run: async ({ query }) => describe(log.add('qloo_tags', { query }, [], await qloo.tags(query))),
-    }),
-  ]
+      schema: z.object({ query: z.string() }),
+      run: async ({ query }: { query: string }) => describe(log.add('qloo_tags', { query }, [], await qloo.tags(query))),
+    },
+  }
+  const toolDefs = Object.entries(tools).map(([name, t]) => {
+    const parameters = z.toJSONSchema(t.schema) as Record<string, unknown>
+    delete parameters.$schema
+    return { type: 'function' as const, function: { name, description: t.description, parameters } }
+  })
 
   const reachNote = input.reach === 'reachable'
     ? `\nReach: the creator has a small budget. Cross-domain results are limited to less mainstream names (Qloo popularity <= ${REACHABLE_MAX_POPULARITY}) that a small team can realistically contact; favour those.`
@@ -119,45 +144,57 @@ export async function runComps(input: RunInput, qloo: QlooClient, client = new A
   const brief = `Pitch: ${input.pitch}\nComps given by the creator: ${input.comps.length ? input.comps.join('; ') : '(none)'}${reachNote}`
 
   const usage: Usage = { input: 0, output: 0, cacheRead: 0, requests: 0 }
-  const add = (u: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number | null }) => {
-    usage.input += u.input_tokens; usage.output += u.output_tokens; usage.cacheRead += u.cache_read_input_tokens ?? 0; usage.requests++
+  const add = (u: ChatUsage) => {
+    usage.input += u.prompt_tokens; usage.output += u.completion_tokens; usage.cacheRead += u.prompt_tokens_details?.cached_tokens ?? 0; usage.requests++
   }
 
-  const runner = client.beta.messages.toolRunner({
-    model: MODEL,
-    max_tokens: 16000,
-    max_iterations: 14,
-    output_config: { effort: 'medium' },
-    system: RESEARCH_SYSTEM,
-    tools,
-    messages: [{ role: 'user', content: brief }],
-    ...FALLBACK,
-  })
-  for await (const message of runner) add(message.usage)
-  const research = await runner.done()
-  const notes = research.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('\n').trim()
+  // Research: tool-calling loop over the Qloo tools
+  const msgs: ChatMessage[] = [{ role: 'system', content: RESEARCH_SYSTEM }, { role: 'user', content: brief }]
+  let notes = ''
+  for (let i = 0; i < 14; i++) {
+    const { message, usage: u } = await chat({ model, messages: msgs, tools: toolDefs, max_completion_tokens: maxTokens(model, 2000) })
+    add(u)
+    msgs.push(message)
+    if (!message.tool_calls?.length) { notes = (message.content ?? '').trim(); break }
+    for (const call of message.tool_calls) {
+      const tool = tools[call.function.name]
+      let content: string
+      if (!tool) content = `Unknown tool ${call.function.name}.`
+      else {
+        let raw: unknown = {}
+        try { raw = JSON.parse(call.function.arguments || '{}') } catch {}
+        const args = tool.schema.safeParse(raw)
+        content = args.success
+          ? await tool.run(args.data as never).catch((e: Error) => `Qloo call failed: ${e.message}`)
+          : `Invalid arguments: ${args.error.issues.map((x) => `${x.path.join('.')} ${x.message}`).join('; ')}`
+      }
+      msgs.push({ role: 'tool', tool_call_id: call.id, content })
+    }
+  }
 
+  // Report: strict JSON schema, then the evidence check drops anything unsupported
   const evidenceText = log.records.map(describe).join('\n\n')
-  const parsed = await client.beta.messages.parse({
-    model: MODEL,
-    max_tokens: 16000,
-    output_config: { effort: 'medium', format: betaZodOutputFormat(ReportSchema) },
-    system: REPORT_SYSTEM,
-    messages: [{ role: 'user', content: `${brief}\n\nResearch notes:\n${notes || '(none)'}\n\nEvidence:\n${evidenceText || '(no evidence collected)'}` }],
-    ...FALLBACK,
+  const { message, usage: u, finish } = await chat({
+    model,
+    messages: [
+      { role: 'system', content: REPORT_SYSTEM },
+      { role: 'user', content: `${brief}\n\nResearch notes:\n${notes || '(none)'}\n\nEvidence:\n${evidenceText || '(no evidence collected)'}` },
+    ],
+    response_format: { type: 'json_schema', json_schema: { name: 'launch_report', schema: strictSchema(ReportSchema), strict: true } },
+    max_completion_tokens: maxTokens(model, 6000),
   })
-  add(parsed.usage)
-  if (parsed.stop_reason === 'refusal') throw new Error('The model declined to write this report.')
-  if (!parsed.parsed_output) throw new Error(`Report could not be parsed (stop reason: ${parsed.stop_reason}).`)
+  add(u)
+  let parsed: Report
+  try { parsed = ReportSchema.parse(JSON.parse(message.content ?? '')) } catch { throw new Error(`Report could not be parsed (finish reason: ${finish}).`) }
 
-  return { report: checkReport(parsed.parsed_output, log), evidence: log.records, qlooMode: qloo.mode, notes, usage }
+  return { report: checkReport(parsed, log), evidence: log.records, qlooMode: qloo.mode, notes, usage, model }
 }
 
 /*
  * "Without Qloo" baseline: the same model, same pitch, no data. Shown next to
  * the Qloo plan so a reader can see what the taste data adds.
  */
-export const BASELINE_MODEL = 'claude-sonnet-5-5'
+export const BASELINE_MODEL = process.env.COMPS_BASELINE_MODEL ?? 'gpt-4.1-mini'
 
 const BaselineSchema = z.object({
   channels: z.array(z.object({
@@ -167,15 +204,16 @@ const BaselineSchema = z.object({
 })
 export interface Baseline { model: string; channels: z.infer<typeof BaselineSchema>['channels']; usage: Usage }
 
-export async function runBaseline(input: RunInput, client = new Anthropic()): Promise<Baseline> {
-  const parsed = await client.beta.messages.parse({
+export async function runBaseline(input: RunInput): Promise<Baseline> {
+  const { message, usage: u } = await chat({
     model: BASELINE_MODEL,
-    max_tokens: 4000,
-    output_config: { effort: 'low', format: betaZodOutputFormat(BaselineSchema) },
-    system: 'Without any external data, suggest where the audience for this indie game or book can be reached: podcasts, music artists, TV shows, brands, books and movies they likely enjoy. Real names only, up to 4 per domain.',
-    messages: [{ role: 'user', content: `Pitch: ${input.pitch}\nComparable titles: ${input.comps.join('; ') || '(none)'}` }],
+    messages: [
+      { role: 'system', content: 'Without any external data, suggest where the audience for this indie game or book can be reached: podcasts, music artists, TV shows, brands, books and movies they likely enjoy. Real names only, up to 4 per domain.' },
+      { role: 'user', content: `Pitch: ${input.pitch}\nComparable titles: ${input.comps.join('; ') || '(none)'}` },
+    ],
+    response_format: { type: 'json_schema', json_schema: { name: 'baseline', schema: strictSchema(BaselineSchema), strict: true } },
+    max_completion_tokens: maxTokens(BASELINE_MODEL, 1500),
   })
-  if (!parsed.parsed_output) throw new Error(`Baseline could not be parsed (stop reason: ${parsed.stop_reason}).`)
-  const u = parsed.usage
-  return { model: BASELINE_MODEL, channels: parsed.parsed_output.channels, usage: { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens ?? 0, requests: 1 } }
+  const parsed = BaselineSchema.parse(JSON.parse(message.content ?? '{}'))
+  return { model: BASELINE_MODEL, channels: parsed.channels, usage: { input: u.prompt_tokens, output: u.completion_tokens, cacheRead: u.prompt_tokens_details?.cached_tokens ?? 0, requests: 1 } }
 }

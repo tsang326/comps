@@ -6,17 +6,47 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createHash } from 'node:crypto'
-import { runBaseline, runComps, type Baseline, type Reach, type RunResult } from './agent.js'
+import { MODEL, runBaseline, runComps, type Baseline, type Reach, type RunResult } from './agent.js'
 import { makeQlooClient } from './qloo.js'
-import { loadSamples } from './samples.js'
+import { loadSamples, redis } from './samples.js'
 
 const MAX_PITCH = 600
 const MAX_COMPS = 4
 const PER_IP_PER_HOUR = 5
+// Model for new public runs (OpenAI); the daily cap bounds what a burst of traffic can cost.
+const PUBLIC_MODEL = process.env.COMPS_PUBLIC_MODEL ?? MODEL
+const DAILY_CAP = Number(process.env.COMPS_DAILY_CAP ?? 50)
 
-const cache = new Map<string, RunResult>()
-const baselineCache = new Map<string, Baseline>()
+const memory = new Map<string, unknown>()
 const hits = new Map<string, number[]>()
+
+/** Results cached by input: Redis when deployed (kept through judging), memory locally. */
+async function getCached<T>(key: string): Promise<T | undefined> {
+  const r = redis()
+  return r ? ((await r.get<T>(`comps:cache:${key}`)) ?? undefined) : (memory.get(key) as T | undefined)
+}
+async function setCached(key: string, value: unknown) {
+  const r = redis()
+  if (r) await r.set(`comps:cache:${key}`, value, { ex: 40 * 86_400 })
+  else memory.set(key, value)
+}
+
+/** Counts one use of `key` in a window; Redis when deployed (shared by all instances), memory locally. */
+async function countUse(key: string, windowSeconds: number): Promise<number> {
+  const r = redis()
+  if (r) {
+    const n = await r.incr(`comps:use:${key}`)
+    if (n === 1) await r.expire(`comps:use:${key}`, windowSeconds)
+    return n
+  }
+  const now = Date.now()
+  const recent = (hits.get(key) ?? []).filter((t) => now - t < windowSeconds * 1000)
+  hits.set(key, [...recent, now])
+  return recent.length + 1
+}
+
+const overDailyCap = async () => (await countUse(`day:${new Date().toISOString().slice(0, 10)}`, 2 * 86_400)) > DAILY_CAP
+const rateLimited = async (ip: string, bucket = 'report') => (await countUse(`${bucket}:${ip}:${new Date().toISOString().slice(0, 13)}`, 3600)) > PER_IP_PER_HOUR
 
 function send(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { 'Content-Type': 'application/json' })
@@ -44,14 +74,6 @@ export function parseInput(body: unknown): { pitch: string; comps: string[]; rea
   return { pitch, comps, reach: b.reach === 'reachable' ? 'reachable' : 'any' }
 }
 
-function rateLimited(ip: string, now = Date.now(), bucket = 'report') {
-  const k = `${bucket}:${ip}`
-  const recent = (hits.get(k) ?? []).filter((t) => now - t < 3_600_000)
-  if (recent.length >= PER_IP_PER_HOUR) return true
-  hits.set(k, [...recent, now])
-  return false
-}
-
 const clientIp = (req: IncomingMessage) => String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? 'unknown').split(',')[0].trim()
 
 /** POST /api/baseline { pitch, comps[] } -> what the model suggests without Qloo. */
@@ -62,12 +84,12 @@ export async function handleBaseline(req: IncomingMessage, res: ServerResponse):
   const input = parseInput(body)
   if (typeof input === 'string') { send(res, 422, { error: input }); return true }
   const key = createHash('sha256').update(JSON.stringify({ pitch: input.pitch, comps: input.comps }).toLowerCase()).digest('hex')
-  const cached = baselineCache.get(key)
+  const cached = await getCached<Baseline>(`baseline:${key}`)
   if (cached) { send(res, 200, cached); return true }
-  if (rateLimited(clientIp(req), Date.now(), 'baseline')) { send(res, 429, { error: 'Too many comparisons from this address; try again in an hour.' }); return true }
+  if (await rateLimited(clientIp(req), 'baseline')) { send(res, 429, { error: 'Too many comparisons from this address; try again in an hour.' }); return true }
   try {
     const b = await runBaseline(input)
-    baselineCache.set(key, b)
+    await setCached(`baseline:${key}`, b)
     send(res, 200, b)
   } catch (err) {
     console.error('baseline failed:', err instanceof Error ? err.message : String(err))
@@ -96,14 +118,15 @@ export async function handleReport(req: IncomingMessage, res: ServerResponse): P
   if (typeof input === 'string') { send(res, 422, { error: input }); return true }
 
   const key = createHash('sha256').update(JSON.stringify(input).toLowerCase()).digest('hex')
-  const cached = cache.get(key)
+  const cached = await getCached<RunResult>(`report:${key}`)
   if (cached) { send(res, 200, { ...cached, cached: true }); return true }
 
-  if (rateLimited(clientIp(req))) { send(res, 429, { error: 'Too many new reports from this address; try again in an hour or open a sample report.' }); return true }
+  if (await overDailyCap()) { send(res, 429, { error: 'Today\'s free reports are used up; open a sample report, or try again tomorrow.' }); return true }
+  if (await rateLimited(clientIp(req))) { send(res, 429, { error: 'Too many new reports from this address; try again in an hour or open a sample report.' }); return true }
 
   try {
-    const result = await runComps(input, makeQlooClient())
-    cache.set(key, result)
+    const result = await runComps(input, makeQlooClient(), PUBLIC_MODEL)
+    await setCached(`report:${key}`, result)
     send(res, 200, result)
   } catch (err) {
     console.error('report failed:', err instanceof Error ? err.message : String(err))

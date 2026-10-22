@@ -43,6 +43,18 @@ describe('checkReport', () => {
     expect(out.positioning).toHaveLength(1)
     expect(out.dropped.map((d) => d.name)).toEqual(['Invented Show', 'No Cite'])
   })
+
+  it('points an item at the right record when the name is in the data but miscited', () => {
+    const report: Report = {
+      audience_summary: 's', comps: [], interpretation: '', limits: [],
+      channels: [{ domain: 'podcast', name: 'Cozy Corner Podcast', action: 'pitch', evidence: ['E2'] }],
+      positioning: [],
+    }
+    const out = checkReport(report, log)
+    expect(out.channels[0].evidence).toEqual(['E1'])
+    expect(out.repaired).toEqual([{ section: 'channels', name: 'Cozy Corner Podcast', from: ['E2'], to: ['E1'] }])
+    expect(out.dropped).toEqual([])
+  })
 })
 
 describe('parseEntities', () => {

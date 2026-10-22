@@ -13,7 +13,7 @@ export interface Sample { slug: string; title: string; input: RunInput; result: 
 const KEY = 'comps:samples'
 const FILE = new URL('../cache/samples.json', import.meta.url)
 
-function redis() {
+export function redis() {
   const url = process.env.KV_REST_API_URL, token = process.env.KV_REST_API_TOKEN
   return url && token ? new Redis({ url, token }) : null
 }

@@ -16,7 +16,7 @@ Indie creators rarely know who their audience is beyond "people who like games l
 | `qloo_insights` | `GET /v2/insights` with `filter.type` + `signal.interests.entities` / `signal.interests.tags` | The core step: what the comps' audience also likes in **other** entity types (podcast, artist, tv_show, brand, book, movie). |
 | `qloo_tags` | `GET /v2/tags` | Turn a theme from the pitch ("cozy", "roguelike") into a tag signal. |
 
-The agent (Claude, via the Anthropic tool-use API) decides which comps and domains to query, notices empty results and tries another comp or domain instead of guessing.
+The agent (OpenAI gpt-4.1-mini with function calling, raw HTTP in `server/openai.ts`) decides which comps and domains to query, notices empty results and tries another comp or domain instead of guessing.
 
 **Provenance by construction.** Every Qloo call is stored server-side as an evidence record (E1, E2, …). The report is written as structured output where each comp, channel and positioning point must cite evidence IDs, and the server then **drops any item whose name does not appear in the evidence it cites** (the UI lists what was dropped). Clicking an evidence chip shows the exact Qloo query and results behind a recommendation.
 
@@ -31,12 +31,12 @@ _To be filled with a real run once the hackathon API key is active: the input pi
 
 ## 5. Run it from a clean environment
 
-Requirements: Node.js 22.18 or newer, an Anthropic API key, a Qloo hackathon API key.
+Requirements: Node.js 22.18 or newer, an OpenAI API key, a Qloo hackathon API key.
 
 ```sh
 git clone <this repo> && cd comps
 npm ci --ignore-scripts
-cp .env.example .env     # set ANTHROPIC_API_KEY, QLOO_API_KEY, QLOO_MODE=live
+cp .env.example .env     # set OPENAI_API_KEY, QLOO_API_KEY, QLOO_MODE=live
 npm start                # web on http://localhost:5173, API on :3001
 npm test
 ```
