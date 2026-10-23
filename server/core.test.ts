@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { EvidenceLog, isSupported } from './evidence.js'
 import { checkReport, type Report } from './agent.js'
 import { parseEntities, MockQlooClient } from './qloo.js'
-import { parseInput } from './handler.js'
+import { parseInput, phase } from './handler.js'
 
 const log = new EvidenceLog()
 log.add('qloo_insights', { type: 'urn:entity:podcast' }, [{ entity_id: 'p1', name: 'Cozy Corner Podcast' }])
@@ -54,6 +54,39 @@ describe('checkReport', () => {
     expect(out.channels[0].evidence).toEqual(['E1'])
     expect(out.repaired).toEqual([{ section: 'channels', name: 'Cozy Corner Podcast', from: ['E2'], to: ['E1'] }])
     expect(out.dropped).toEqual([])
+  })
+  it('checks channels against the domain queried and comps against the creator\'s titles', () => {
+    const l = new EvidenceLog()
+    l.add('qloo_search', { query: 'Stardew Valley', type: 'urn:entity:videogame' }, [{ entity_id: 'g1', name: 'Stardew Valley' }, { entity_id: 'g2', name: 'Monument Valley' }])
+    l.add('qloo_insights', { type: 'urn:entity:podcast', entity_ids: ['g1'] }, [{ entity_id: 'p1', name: 'Night Vale' }])
+    l.add('qloo_insights', { type: 'urn:entity:videogame', tag_ids: ['cozy'] }, [{ entity_id: 'g3', name: 'Tag Only Game' }])
+    l.add('qloo_insights', { type: 'urn:entity:videogame', entity_ids: ['g1'] }, [{ entity_id: 'g4', name: 'A Short Hike' }])
+    const report: Report = {
+      audience_summary: 's', interpretation: '', limits: [], positioning: [],
+      comps: [
+        { name: 'Stardew Valley', why: '', evidence: ['E1'] },
+        { name: 'Monument Valley', why: '', evidence: ['E1'] },
+        { name: 'Tag Only Game', why: '', evidence: ['E3'] },
+        { name: 'A Short Hike', why: '', evidence: ['E4', 'D87A3DA3-UUID'] },
+      ],
+      channels: [
+        { domain: 'podcast', name: 'Night Vale', action: '', evidence: ['E2'] },
+        { domain: 'brand', name: 'Night Vale', action: '', evidence: ['E2'] },
+      ],
+    }
+    const out = checkReport(report, l, ['stardew valley'])
+    expect(out.comps.map((c) => c.name)).toEqual(['Stardew Valley', 'A Short Hike'])
+    expect(out.comps[1].evidence).toEqual(['E4'])
+    expect(out.channels).toHaveLength(1)
+    expect(out.dropped.map((d) => d.name)).toEqual(['Monument Valley', 'Tag Only Game', 'Night Vale'])
+  })
+})
+
+describe('phase', () => {
+  it('raises the allowance during judging (2-16 Nov, VN time)', () => {
+    expect(phase(Date.parse('2026-10-25T00:00:00Z')).name).toBe('pre')
+    expect(phase(Date.parse('2026-11-05T00:00:00Z')).name).toBe('judging')
+    expect(phase(Date.parse('2026-11-20T00:00:00Z')).name).toBe('pre')
   })
 })
 

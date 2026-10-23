@@ -5,7 +5,7 @@
 import { z } from 'zod'
 import { chat, strictSchema, type ChatMessage, type ChatUsage } from './openai.js'
 import { ENTITY_TYPES, type QlooClient } from './qloo.js'
-import { EvidenceLog, describe, isSupported } from './evidence.js'
+import { EvidenceLog, describe, isSupported, type Evidence } from './evidence.js'
 
 // OpenAI model for reports and samples: gpt-4.1 gave the fullest, best-cited plan in our comparison
 export const MODEL = process.env.COMPS_MODEL ?? 'gpt-4.1'
@@ -61,23 +61,38 @@ export interface CheckedReport extends Report {
 }
 
 /**
- * Keep only items whose name appears in the Qloo evidence. If the name is in the
- * data but the model cited the wrong record (common with smaller models), point
- * the item at the records that do contain it instead of dropping it.
+ * Keep only items the Qloo evidence backs, by section:
+ * - a channel must be an entity returned by an Insights query for that same domain;
+ * - a comp must come from an Insights query seeded by entities, or be a title the
+ *   creator typed (a search hit alone only proves a title exists);
+ * - a positioning point may rest on any entity or tag in the evidence.
+ * Citations that are not evidence ids are removed. If the name is backed but the model
+ * cited the wrong record, the item is pointed at the records that do back it.
  */
-export function checkReport(report: Report, log: EvidenceLog): CheckedReport {
+export function checkReport(report: Report, log: EvidenceLog, userComps: string[] = []): CheckedReport {
   const dropped: CheckedReport['dropped'] = []
   const repaired: CheckedReport['repaired'] = []
-  const allIds = log.records.map((r) => r.id)
-  const keep = <T extends { name: string; evidence: string[] }>(section: string, items: T[]) =>
+  const typed = new Set(userComps.map(normName))
+  const insights = (r: Evidence) => r.tool === 'qloo_insights'
+  const allowed: Record<string, (r: Evidence, it: { name: string; domain?: string }) => boolean> = {
+    channels: (r, it) => insights(r) && r.input.type === `urn:entity:${it.domain}` && r.entities.some((e) => normName(e.name) === normName(it.name)),
+    comps: (r, it) => (insights(r) && Array.isArray(r.input.entity_ids) && (r.input.entity_ids as unknown[]).length > 0) || (r.tool === 'qloo_search' && typed.has(normName(it.name))),
+    positioning: () => true,
+  }
+  const keep = <T extends { name: string; evidence: string[]; domain?: string }>(section: string, items: T[]) =>
     items.flatMap((it) => {
-      if (isSupported(log, it.name, it.evidence)) return [it]
-      const found = allIds.filter((id) => isSupported(log, it.name, [id]))
+      const ok = (id: string) => { const r = log.get(id); return !!r && allowed[section](r, it) && isSupported(log, it.name, [id]) }
+      const cited = it.evidence.filter(ok)
+      if (cited.length && cited.length === it.evidence.length) return [it]
+      const found = cited.length ? cited : log.records.map((r) => r.id).filter(ok)
       if (found.length) {
         repaired.push({ section, name: it.name, from: it.evidence, to: found })
         return [{ ...it, evidence: found }]
       }
-      dropped.push({ section, name: it.name, reason: it.evidence.length ? `not found in ${it.evidence.join(', ')} or any other Qloo result` : 'not in any Qloo result' })
+      const why = section === 'channels' ? `not returned by an Insights query for ${it.domain}`
+        : section === 'comps' ? 'not returned by an Insights query on your comps'
+        : 'not in any Qloo result'
+      dropped.push({ section, name: it.name, reason: why })
       return []
     })
   return {
@@ -89,6 +104,8 @@ export function checkReport(report: Report, log: EvidenceLog): CheckedReport {
     repaired,
   }
 }
+
+const normName = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
 
 export type Reach = 'any' | 'reachable'
 export interface RunInput { pitch: string; comps: string[]; reach?: Reach }
@@ -187,7 +204,7 @@ export async function runComps(input: RunInput, qloo: QlooClient, model = MODEL)
   let parsed: Report
   try { parsed = ReportSchema.parse(JSON.parse(message.content ?? '')) } catch { throw new Error(`Report could not be parsed (finish reason: ${finish}).`) }
 
-  return { report: checkReport(parsed, log), evidence: log.records, qlooMode: qloo.mode, notes, usage, model }
+  return { report: checkReport(parsed, log, input.comps), evidence: log.records, qlooMode: qloo.mode, notes, usage, model }
 }
 
 /*

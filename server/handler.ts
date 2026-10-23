@@ -6,7 +6,7 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { createHash } from 'node:crypto'
-import { MODEL, runBaseline, runComps, type Baseline, type Reach, type RunResult } from './agent.js'
+import { MODEL, costUSD, runBaseline, runComps, type Baseline, type Reach, type RunResult } from './agent.js'
 import { makeQlooClient } from './qloo.js'
 import { loadSamples, redis } from './samples.js'
 
@@ -17,9 +17,20 @@ const PER_IP_PER_HOUR = 5
 // office IP is not punished for one heavy user, and one device can't rotate IPs.
 const PER_DEVICE_PER_HOUR = 3
 const PER_DEVICE_PER_DAY = 8
-// Model for new public runs (OpenAI); the daily cap bounds what a burst of traffic can cost.
+// Model for new public runs (OpenAI)
 const PUBLIC_MODEL = process.env.COMPS_PUBLIC_MODEL ?? MODEL
-const DAILY_CAP = Number(process.env.COMPS_DAILY_CAP ?? 10)
+
+// Judging runs 2-16 Nov 2026. Before it the demo gets a small allowance; during it, more.
+// Each phase also has a spend budget, so a burst of traffic cannot drain the credit.
+const JUDGING_FROM = Date.parse('2026-11-01T17:00:00Z') // 2 Nov 00:00 VN
+const JUDGING_TO = Date.parse('2026-11-17T17:00:00Z')
+export function phase(now = Date.now()) {
+  const judging = now >= JUDGING_FROM && now < JUDGING_TO
+  return judging
+    ? { name: 'judging', reportsPerDay: 8, baselinesPerDay: 20, budgetUSD: 0.7 }
+    : { name: 'pre', reportsPerDay: 3, baselinesPerDay: 6, budgetUSD: 0.3 }
+}
+const PAUSED = 'Live runs are paused for today to keep this free demo within its budget. The sample plans above are complete runs you can open.'
 
 const memory = new Map<string, unknown>()
 const hits = new Map<string, number[]>()
@@ -49,7 +60,31 @@ async function countUse(key: string, windowSeconds: number): Promise<number> {
   return recent.length + 1
 }
 
-const overDailyCap = async () => (await countUse(`day:${new Date().toISOString().slice(0, 10)}`, 2 * 86_400)) > DAILY_CAP
+const overDailyCap = async (bucket: 'report' | 'baseline') => {
+  const p = phase()
+  return (await countUse(`${bucket}:day:${new Date().toISOString().slice(0, 10)}`, 2 * 86_400)) > (bucket === 'report' ? p.reportsPerDay : p.baselinesPerDay)
+}
+
+/** Dollars spent on model calls in the current phase (Redis when deployed, memory locally). */
+async function spent(): Promise<number> {
+  const r = redis(), k = `spent:${phase().name}`
+  return r ? Number((await r.get(`comps:${k}`)) ?? 0) : Number(memory.get(k) ?? 0)
+}
+async function addSpend(usd: number) {
+  const r = redis(), k = `spent:${phase().name}`
+  if (r) await r.incrbyfloat(`comps:${k}`, usd)
+  else memory.set(k, Number(memory.get(k) ?? 0) + usd)
+}
+const overBudget = async () => (await spent()) >= phase().budgetUSD
+
+/** A sample whose input matches this request: served as-is, no model call. */
+async function sampleFor(key: string, keyOf: (i: { pitch: string; comps: string[]; reach: Reach }) => string) {
+  for (const s of await loadSamples()) {
+    const i = parseInput(s.input)
+    if (typeof i !== 'string' && keyOf(i) === key) return s
+  }
+  return undefined
+}
 const rateLimited = async (ip: string, bucket = 'report') => (await countUse(`${bucket}:${ip}:${new Date().toISOString().slice(0, 13)}`, 3600)) > PER_IP_PER_HOUR
 
 /** The browser's device id (x-device-id), or '' when missing or malformed. */
@@ -100,12 +135,15 @@ export async function handleBaseline(req: IncomingMessage, res: ServerResponse):
   try { body = await readJson(req) } catch { send(res, 400, { error: 'Invalid JSON body.' }); return true }
   const input = parseInput(body)
   if (typeof input === 'string') { send(res, 422, { error: input }); return true }
-  const key = createHash('sha256').update(JSON.stringify({ pitch: input.pitch, comps: input.comps }).toLowerCase()).digest('hex')
-  const cached = await getCached<Baseline>(`baseline:${key}`)
+  const keyOf = (i: { pitch: string; comps: string[] }) => createHash('sha256').update(JSON.stringify({ pitch: i.pitch, comps: i.comps }).toLowerCase()).digest('hex')
+  const key = keyOf(input)
+  const cached = await getCached<Baseline>(`baseline:${key}`) ?? (await sampleFor(key, keyOf))?.baseline
   if (cached) { send(res, 200, cached); return true }
   if (await deviceLimited(req, 'baseline') || await rateLimited(clientIp(req), 'baseline')) { send(res, 429, { error: 'Too many comparisons from this address; try again in an hour.' }); return true }
+  if (await overBudget() || await overDailyCap('baseline')) { send(res, 429, { error: PAUSED }); return true }
   try {
     const b = await runBaseline(input)
+    await addSpend(costUSD(b.model, b.usage))
     await setCached(`baseline:${key}`, b)
     send(res, 200, b)
   } catch (err) {
@@ -134,15 +172,18 @@ export async function handleReport(req: IncomingMessage, res: ServerResponse): P
   const input = parseInput(body)
   if (typeof input === 'string') { send(res, 422, { error: input }); return true }
 
-  const key = createHash('sha256').update(JSON.stringify(input).toLowerCase()).digest('hex')
-  const cached = await getCached<RunResult>(`report:${key}`)
+  const keyOf = (i: object) => createHash('sha256').update(JSON.stringify(i).toLowerCase()).digest('hex')
+  const key = keyOf(input)
+  const cached = await getCached<RunResult>(`report:${key}`) ?? (await sampleFor(key, keyOf))?.result
   if (cached) { send(res, 200, { ...cached, cached: true }); return true }
 
-  if (await overDailyCap()) { send(res, 429, { error: 'Today\'s free reports are used up; open a sample report, or try again tomorrow.' }); return true }
+  // Per device and IP first, so one client hitting its own limit does not use up the day for everyone
   if (await deviceLimited(req) || await rateLimited(clientIp(req))) { send(res, 429, { error: 'Too many new reports from this address; try again in an hour or open a sample report.' }); return true }
+  if (await overBudget() || await overDailyCap('report')) { send(res, 429, { error: PAUSED }); return true }
 
   try {
     const result = await runComps(input, makeQlooClient(), PUBLIC_MODEL)
+    await addSpend(costUSD(result.model, result.usage))
     await setCached(`report:${key}`, result)
     send(res, 200, result)
   } catch (err) {

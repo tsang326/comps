@@ -110,7 +110,6 @@ export class HttpQlooClient implements QlooClient {
   }
 
   async tags(query: string) {
-    // TODO(key day): confirm the query parameter name for /v2/tags
     const json = (await this.get('/v2/tags', { 'filter.query': query })) as { results?: { tags?: unknown[] } }
     return (json.results?.tags ?? []).flatMap((raw) => {
       const t = raw as Record<string, unknown>

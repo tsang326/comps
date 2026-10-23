@@ -55,7 +55,7 @@ function EvidenceChips({ ids, name, onOpen }: { ids: string[]; name?: string; on
 function Affinity({ value }: { value?: number }) {
   if (value === undefined) return null
   return (
-    <span className="aff" title={`Qloo affinity ${value.toFixed(2)}: how strongly this audience over-indexes on it`}>
+    <span className="aff" title={`Qloo affinity score ${value.toFixed(2)} (0 to 1) for this audience`}>
       <span className="aff-bar"><span style={{ width: `${Math.round(value * 100)}%` }} /></span>
       <span className="aff-num">{value.toFixed(2)}</span>
     </span>
@@ -66,7 +66,7 @@ const TOOL_LABEL: Record<Evidence['tool'], string> = {
   qloo_search: 'Search', qloo_insights: 'Insights', qloo_tags: 'Tags',
 }
 
-function EvidenceDrawer({ ev, highlight, onClose }: { ev: Evidence; highlight?: string; onClose: () => void }) {
+function EvidenceDrawer({ ev, names, highlight, onClose }: { ev: Evidence; names: Map<string, string>; highlight?: string; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
     window.addEventListener('keydown', onKey)
@@ -84,7 +84,7 @@ function EvidenceDrawer({ ev, highlight, onClose }: { ev: Evidence; highlight?: 
         <p className="muted small">The exact query the agent sent, and what Qloo returned. The plan may only name things that appear here.</p>
         <dl className="query">
           {Object.entries(ev.input).map(([k, v]) => (
-            <div key={k}><dt>{k}</dt><dd>{Array.isArray(v) ? v.join(', ') : String(v)}</dd></div>
+            <div key={k}><dt>{k}</dt><dd>{Array.isArray(v) ? v.map((x) => names.get(String(x)) ?? String(x)).join(', ') : String(v)}</dd></div>
           ))}
         </dl>
         {ev.entities.length + ev.tags.length === 0 && <p className="muted">Qloo returned nothing for this query.</p>}
@@ -128,7 +128,7 @@ function Comparison({ result, baseline }: { result: RunResult; baseline: Baselin
   return (
     <section className="card compare">
       <h2>What Qloo adds</h2>
-      <p className="muted">The same pitch, given to the same kind of model with no data ({baseline.model}), next to the Qloo-grounded plan.</p>
+      <p className="muted">The same pitch, given to the same model with no data ({baseline.model}), next to the Qloo-grounded plan. The model's picks often fit the genre; Qloo's show where this audience actually overlaps, which is less obvious and easier to act on.</p>
       <div className="cols">
         <div className="col qloo"><h3>Only with Qloo <span className="count">{qlooOnly.length}</span></h3>
           <ul>{qlooOnly.map((c) => <li key={c.name}><DomainIcon domain={c.domain} />{c.name}</li>)}</ul></div>
@@ -136,7 +136,7 @@ function Comparison({ result, baseline }: { result: RunResult; baseline: Baselin
           <ul>{both.map((c) => <li key={c.name}>{c.name}</li>)}</ul>
           {both.length === 0 && <p className="muted small">No overlap.</p>}</div>
         <div className="col model"><h3>Model alone <span className="count">{modelOnly.length}</span></h3>
-          <ul>{modelOnly.map((c) => <li key={c.name}>{c.name} <span className={inEvidence.has(norm(c.name)) ? 'pill ok' : 'pill'}>{inEvidence.has(norm(c.name)) ? 'also in Qloo data' : 'no Qloo signal'}</span></li>)}</ul></div>
+          <ul>{modelOnly.map((c) => <li key={c.name}>{c.name}{inEvidence.has(norm(c.name)) && <> <span className="pill ok">in this plan's Qloo results</span></>}</li>)}</ul></div>
       </div>
     </section>
   )
@@ -175,6 +175,7 @@ function SampleCard({ s, active, onOpen }: { s: Sample; active: boolean; onOpen:
 
 export default function App() {
   const [samples, setSamples] = useState<Sample[]>([])
+  const [ran, setRan] = useState<Sample['input'] | null>(null)
   const [active, setActive] = useState<string | null>(null)
   const [pitch, setPitch] = useState(EXAMPLE.pitch)
   const [comps, setComps] = useState(EXAMPLE.comps)
@@ -187,7 +188,7 @@ export default function App() {
   const [open, setOpen] = useState<Open>(null)
   const [elapsed, setElapsed] = useState(0)
   useEffect(() => {
-    fetch('/api/samples').then((r) => r.json()).then((s) => Array.isArray(s) && setSamples(s)).catch(() => {})
+    fetch('/api/samples').then((r) => r.json()).then((s) => Array.isArray(s) && setSamples([...s].sort((a: Sample, b: Sample) => Number(b.input.reach === 'reachable') - Number(a.input.reach === 'reachable')))).catch(() => {})
   }, [])
   useEffect(() => {
     if (!busy) return
@@ -200,21 +201,22 @@ export default function App() {
 
   const showSample = (s: Sample) => {
     setActive(s.slug); setPitch(s.input.pitch); setComps(s.input.comps.join(', ')); setReach(s.input.reach ?? 'any')
-    setError(null); setOpen(null); setResult(s.result); setBaseline(s.baseline ?? null)
+    setError(null); setOpen(null); setResult(s.result); setBaseline(s.baseline ?? null); setRan(s.input)
     scrollToReport()
   }
 
   async function run() {
     setBusy(true); setError(null); setResult(null); setOpen(null); setBaseline(null); setActive(null)
+    const input = { pitch, comps: comps.split(/[,;\n]/).map((c) => c.trim()).filter(Boolean), reach }
     try {
       const res = await fetch('/api/report', {
         method: 'POST',
         headers: HEADERS,
-        body: JSON.stringify({ pitch, comps: comps.split(/[,;\n]/), reach }),
+        body: JSON.stringify(input),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
-      setResult(data)
+      setResult(data); setRan(input)
       scrollToReport()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -226,7 +228,7 @@ export default function App() {
   async function compare() {
     setComparing(true); setError(null)
     try {
-      const res = await fetch('/api/baseline', { method: 'POST', headers: HEADERS, body: JSON.stringify({ pitch, comps: comps.split(/[,;\n]/) }) })
+      const res = await fetch('/api/baseline', { method: 'POST', headers: HEADERS, body: JSON.stringify({ pitch: ran?.pitch ?? pitch, comps: ran?.comps ?? [] }) })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
       setBaseline(data)
@@ -242,6 +244,8 @@ export default function App() {
   const byDomain: Record<string, NonNullable<typeof r>['channels']> = {}
   for (const c of r?.channels ?? []) (byDomain[c.domain] ??= []).push(c)
   const sample = samples.find((s) => s.slug === active)
+  const names = new Map((result?.evidence ?? []).flatMap((e) => e.entities.map((x) => [x.entity_id, x.name] as [string, string])))
+  const typed = new Set((ran?.comps ?? []).map(norm))
 
   return (
     <>
@@ -298,7 +302,7 @@ export default function App() {
 
             <header className="report-head">
               <p className="eyebrow">Launch plan{sample ? ` · ${sample.title}` : ''}</p>
-              <blockquote>{pitch}</blockquote>
+              <blockquote>{ran?.pitch ?? pitch}</blockquote>
               <dl className="stats">
                 <div><dt>Qloo queries</dt><dd>{result.evidence.length}</dd></div>
                 <div><dt>Channels</dt><dd>{r.channels.length}</dd></div>
@@ -308,7 +312,7 @@ export default function App() {
             </header>
 
             <section className="card audience">
-              <h2>Who this is for</h2>
+              <h2>Who this is for <span className="tag soft">summary written from the evidence below</span></h2>
               <p>{r.audience_summary}</p>
             </section>
 
@@ -318,7 +322,7 @@ export default function App() {
                 <div className="comp-grid">
                   {r.comps.map((c) => (
                     <div key={c.name} className="comp">
-                      <b>{c.name}</b>
+                      <b>{c.name}</b> <span className="pill">{typed.has(norm(c.name)) ? 'your title' : 'found by Qloo'}</span>
                       <p>{c.why}</p>
                       <EvidenceChips ids={c.evidence} name={c.name} onOpen={setOpen} />
                     </div>
@@ -329,7 +333,7 @@ export default function App() {
 
             <section className="card">
               <h2>Where to reach them</h2>
-              <p className="muted small">Bars show Qloo affinity: how strongly this audience over-indexes on each one.</p>
+              <p className="muted small">Bars show Qloo's affinity score for this audience; popularity (0 to 1) is how mainstream the item is. Expect surprises: taste overlaps cross genres (fans of a cozy game may also love a horror audio drama). Those overlaps are the point, and each one links to the query that found it.</p>
               <div className="domains">
                 {Object.entries(byDomain).map(([domain, items]) => (
                   <div key={domain} className="domain">
@@ -340,6 +344,7 @@ export default function App() {
                         return (
                           <li key={c.name}>
                             <div className="ch-top"><b>{c.name}</b><Affinity value={ent?.affinity} /></div>
+                            {ent?.popularity !== undefined && <span className="muted small">popularity {ent.popularity.toFixed(2)}</span>}
                             <p>{c.action}</p>
                             <EvidenceChips ids={c.evidence} name={c.name} onOpen={setOpen} />
                           </li>
@@ -377,7 +382,10 @@ export default function App() {
               <h2>What this does not tell you</h2>
               <ul>{r.limits.map((l) => <li key={l}>{l}</li>)}</ul>
               {r.dropped.length > 0 && (
-                <p className="muted">Removed {r.dropped.length} suggestion{r.dropped.length > 1 ? 's' : ''} the evidence did not back: {r.dropped.map((d) => d.name).join(', ')}.</p>
+                <p className="muted">Removed {r.dropped.length} suggestion{r.dropped.length > 1 ? 's' : ''} the evidence did not back: {r.dropped.map((d) => d.name.length > 40 ? d.name.slice(0, 40) + '…' : d.name).join(', ')}.</p>
+              )}
+              {r.repaired.length > 0 && (
+                <p className="muted">Corrected {r.repaired.length} citation{r.repaired.length > 1 ? 's' : ''} that pointed at the wrong Qloo result (the item was in the data, just under another query).</p>
               )}
             </section>
           </article>
@@ -386,7 +394,7 @@ export default function App() {
         <footer className="muted small">Qloo results describe what groups of people tend to like, not what any one person will do. · <a href={REPO} target="_blank" rel="noreferrer">Source on GitHub</a></footer>
       </main>
 
-      {ev && <EvidenceDrawer ev={ev} highlight={open?.name} onClose={() => setOpen(null)} />}
+      {ev && <EvidenceDrawer ev={ev} names={names} highlight={open?.name} onClose={() => setOpen(null)} />}
     </>
   )
 }
