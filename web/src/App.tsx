@@ -382,10 +382,13 @@ export default function App() {
               <h2>What this does not tell you</h2>
               <ul>{r.limits.map((l) => <li key={l}>{l}</li>)}</ul>
               {r.dropped.length > 0 && (
-                <p className="muted">Removed {r.dropped.length} suggestion{r.dropped.length > 1 ? 's' : ''} the evidence did not back: {r.dropped.map((d) => d.name.length > 40 ? d.name.slice(0, 40) + '…' : d.name).join(', ')}.</p>
+                <>
+                  <p className="muted">Removed {r.dropped.length} suggestion{r.dropped.length > 1 ? 's' : ''} the evidence did not back:</p>
+                  <ul className="muted small">{r.dropped.map((d) => <li key={d.section + d.name}><b>{d.name.length > 40 ? d.name.slice(0, 40) + '…' : d.name}</b> ({d.section}): {d.reason}</li>)}</ul>
+                </>
               )}
               {r.repaired.length > 0 && (
-                <p className="muted">Corrected {r.repaired.length} citation{r.repaired.length > 1 ? 's' : ''} that pointed at the wrong Qloo result (the item was in the data, just under another query).</p>
+                <p className="muted">Corrected {r.repaired.length} citation{r.repaired.length > 1 ? 's' : ''}: the item is in the Qloo data, but the model cited another record or a raw Qloo id, so the citation now points at the record that contains it.</p>
               )}
             </section>
           </article>

@@ -92,7 +92,7 @@ export function checkReport(report: Report, log: EvidenceLog, userComps: string[
         return [{ ...it, evidence: found }]
       }
       const why = section === 'channels' ? `not returned by an Insights query for ${it.domain}`
-        : section === 'comps' ? 'not returned by an Insights query on your comps'
+        : section === 'comps' ? 'not returned by an Insights query seeded by comps'
         : 'not in any Qloo result'
       dropped.push({ section, name: it.name, reason: why })
       return []
