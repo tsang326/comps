@@ -19,7 +19,7 @@ const PER_DEVICE_PER_HOUR = 3
 const PER_DEVICE_PER_DAY = 8
 // Model for new public runs (OpenAI); the daily cap bounds what a burst of traffic can cost.
 const PUBLIC_MODEL = process.env.COMPS_PUBLIC_MODEL ?? MODEL
-const DAILY_CAP = Number(process.env.COMPS_DAILY_CAP ?? 30)
+const DAILY_CAP = Number(process.env.COMPS_DAILY_CAP ?? 10)
 
 const memory = new Map<string, unknown>()
 const hits = new Map<string, number[]>()
