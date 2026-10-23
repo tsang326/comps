@@ -44,7 +44,6 @@ From the "Cozy lighthouse farming game" sample (live API, 10 Qloo calls; entity 
 - Screenshots below. They contain no API keys or personal data.
 
 ![Landing page](docs/home.png)
-![A launch plan with the evidence drawer open](docs/plan.png)
 
 ## 5. Run it from a clean environment
 
