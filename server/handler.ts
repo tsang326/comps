@@ -31,6 +31,8 @@ export function phase(now = Date.now()) {
     : { name: 'pre', reportsPerDay: 3, baselinesPerDay: 6, budgetUSD: 0.3 }
 }
 const PAUSED = 'Live runs are paused for today to keep this free demo within its budget. The sample plans above are complete runs you can open.'
+// OpenAI answers 429 with insufficient_quota when the account's credit is gone: say "paused", not "try again"
+const outOfCredit = (err: unknown) => /OpenAI 429[\s\S]*insufficient_quota|OpenAI 402/.test(err instanceof Error ? err.message : String(err))
 
 const memory = new Map<string, unknown>()
 const hits = new Map<string, number[]>()
@@ -148,7 +150,8 @@ export async function handleBaseline(req: IncomingMessage, res: ServerResponse):
     send(res, 200, b)
   } catch (err) {
     console.error('baseline failed:', err instanceof Error ? err.message : String(err))
-    send(res, 502, { error: 'The comparison failed. Please try again in a minute.' })
+    if (outOfCredit(err)) send(res, 503, { error: PAUSED })
+    else send(res, 502, { error: 'The comparison failed. Please try again in a minute.' })
   }
   return true
 }
@@ -188,7 +191,8 @@ export async function handleReport(req: IncomingMessage, res: ServerResponse): P
     send(res, 200, result)
   } catch (err) {
     console.error('report failed:', err instanceof Error ? err.message : String(err))
-    send(res, 502, { error: 'The research run failed. Please try again in a minute.' })
+    if (outOfCredit(err)) send(res, 503, { error: PAUSED })
+    else send(res, 502, { error: 'The research run failed. Please try again in a minute.' })
   }
   return true
 }
