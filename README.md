@@ -26,7 +26,7 @@ _To be filled with a real run once the hackathon API key is active: the input pi
 
 ## 4. Demo
 
-- Live demo: _link after deployment_. The landing page has finished sample plans you can open without waiting.
+- Live demo: https://comps-three-pi.vercel.app. The landing page has finished sample plans you can open without waiting.
 - Screenshots / short video: _to be added_. They contain no API keys or personal data.
 
 ## 5. Run it from a clean environment
