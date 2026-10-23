@@ -82,11 +82,13 @@ export function checkReport(report: Report, log: EvidenceLog, userComps: string[
   const keep = <T extends { name: string; evidence: string[]; domain?: string }>(section: string, items: T[]) =>
     items.flatMap((it) => {
       const ok = (id: string) => { const r = log.get(id); return !!r && allowed[section](r, it) && isSupported(log, it.name, [id]) }
-      const cited = it.evidence.filter(ok)
-      if (cited.length && cited.length === it.evidence.length) return [it]
+      // Models sometimes cite raw Qloo entity ids next to E-ids; those are not evidence records, drop them quietly
+      const ids = it.evidence.filter((id) => log.get(id))
+      const cited = ids.filter(ok)
+      if (cited.length && cited.length === ids.length) return [{ ...it, evidence: ids }]
       const found = cited.length ? cited : log.records.map((r) => r.id).filter(ok)
       if (found.length) {
-        repaired.push({ section, name: it.name, from: it.evidence, to: found })
+        repaired.push({ section, name: it.name, from: ids, to: found })
         return [{ ...it, evidence: found }]
       }
       const why = section === 'channels' ? `not returned by an Insights query for ${it.domain}`

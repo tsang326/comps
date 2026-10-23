@@ -77,6 +77,7 @@ describe('checkReport', () => {
     const out = checkReport(report, l, ['stardew valley'])
     expect(out.comps.map((c) => c.name)).toEqual(['Stardew Valley', 'A Short Hike'])
     expect(out.comps[1].evidence).toEqual(['E4'])
+    expect(out.repaired).toEqual([])
     expect(out.channels).toHaveLength(1)
     expect(out.dropped.map((d) => d.name)).toEqual(['Monument Valley', 'Tag Only Game', 'Night Vale'])
   })
