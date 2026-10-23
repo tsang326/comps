@@ -39,6 +39,7 @@ From the "Cozy lighthouse farming game" sample (live API, 10 Qloo calls; entity 
 
 ## 4. Demo
 
+- Video (1:35): https://youtu.be/kQB5xzuWwDs
 - Live demo: https://comps-three-pi.vercel.app. The landing page has finished sample plans you can open without waiting.
 - Screenshots below. They contain no API keys or personal data.
 
